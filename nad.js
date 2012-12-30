@@ -3,6 +3,10 @@
 
 function isString(x) { return typeof x == 'string' || x instanceof String }
 
+function implies(a, b) {
+  return a ? b : true;
+}
+
 function pushArray(into, newItems) {
   into.push.apply(into, newItems);
 };
@@ -146,24 +150,6 @@ Link.prototype.compile = function(bindings) {
 // TODO: what if child object is already compiled or is a template or something?
 
 
-// parentDom: must be a dom node
-// other two args: can be either dom nodes or ui objects.
-function insertInto(parentDom, childUi, beforeUi) {
-  if (childUi instanceof UiObject) {
-    childUi.insertInto(parentDom, beforeUi);
-  } else {
-    parentDom.insertBefore(childUi, UiObject.getNextNode(beforeUi));
-  }
-}
-
-function remove(childUi) {
-  if (childUi instanceof UiObject) {
-    childUi.remove();
-  } else {
-    domRemove(childUi);
-  }
-}
-
 Elem.prototype.compile = function(bindings) {
   var me = this;
 
@@ -230,6 +216,29 @@ TextBlob.prototype.compile = function(bindings) {
   }
 }
 
+// all args: can be either dom nodes or ui objects.
+function insertInto(parentUi, childUi, beforeUi) {
+  if (childUi instanceof UiObject) {
+    childUi.insertInto(parentUi, beforeUi);
+  } else {
+    var beforeNode = UiObject.getNodeOrNext(beforeUi);
+    if (parentUi instanceof UiObject) {
+      parentUi.insertDom(childUi, beforeNode);
+    } else {
+      var beforeNode = UiObject.getNodeOrNext(beforeUi);
+      parentUi.insertBefore(childUi, beforeNode);
+    }
+  }
+}
+
+function remove(childUi) {
+  if (childUi instanceof UiObject) {
+    childUi.remove();
+  } else {
+    domRemove(childUi);
+  }
+}
+
 function UiObject(){}
 UiObject.asNode = function(obj) {
   if (obj instanceof UiObject) {
@@ -238,8 +247,8 @@ UiObject.asNode = function(obj) {
 
   return obj;
 }
-UiObject.prototype.insertInto = function(parentDom, beforeSibling) {
-  this.parentDom = parentDom;
+UiObject.prototype.insertInto = function(parentUi, beforeSibling) {
+  this.parentUi = parentUi;
   this.nextUi = beforeSibling;
 }
 // NOTE: remove is not the opposite of insertInto
@@ -251,7 +260,7 @@ UiObject.prototype.remove = function() {
   this.detachDom();
   //assert(node == null || node.parentNode == null, 'amend not called or did not physically detach the dom');
 
-  this.parentDom = null;
+  this.parentUi = null;
   this.nextUi = null;
 }
 
@@ -262,11 +271,20 @@ UiObject.prototype.detachDom = function() {
   }
 }
 
+UiObject.prototype.insertDom = function(node, beforeNode) {
+  if (beforeNode != null) {
+    assert(this.getContainingNode() == beforeNode.parentNode, 'invalid structure');
+    beforeNode.parentNode.insertBefore(node, beforeNode);
+  } else {
+    insertInto(this.parentUi, node, this.getNextNode());
+  }
+}
+
 UiObject.prototype.getNodeOrNext = function() {
   return this.currentNode() || this.getNextNode();
 }
 
-UiObject.getNextNode = function(nextUi) {
+UiObject.getNodeOrNext = function(nextUi) {
   var next = (nextUi instanceof UiObject 
       ? nextUi.getNodeOrNext()
       : nextUi);
@@ -274,9 +292,16 @@ UiObject.getNextNode = function(nextUi) {
   return next;
 }
 
+UiObject.prototype.getContainingNode = function() {
+  if (this.parentUi instanceof UiObject) {
+    return this.parentUi.getContainingNode();
+  }
+  return this.parentUi;
+}
+
 UiObject.prototype.getNextNode = function() {
-  var next = UiObject.getNextNode(this.nextUi);
-  assert(next.parentNode == this.parentDom, 'invalid dom structure');
+  var next = UiObject.getNodeOrNext(this.nextUi);
+  assert(next == null || next.parentNode == this.getContainingNode(), 'invalid dom structure');
   return next;
 }
 
@@ -297,16 +322,16 @@ function asScopeFunc(val) {
   return val;
 }
 
-function When(predicate, struct) {
-  this.predicate = predicate;
-  this.struct = struct;
-}
-
 // TODO: try to get rid of needing this.
 function newBindingId(debug) {
   return '$_' + (newBindingId.next++) + '_' + (debug || '');
 }
 newBindingId.next = 1;
+
+function When(predicate, struct) {
+  this.predicate = predicate;
+  this.struct = struct;
+}
 
 When.prototype = new Unit;
 When.prototype.compile = function(bindings) {
@@ -342,7 +367,86 @@ function WhenUi(predicate, model, renderInner, amendInner) {
   this.inner = null;
 }
 WhenUi.prototype = new UiObject;
+
+WhenUi.prototype.currentNode = function() {
+  assert(implies(this.shouldAppear, this.inner != null), 'WhenUi invariant failed');
+
+  return this.shouldAppear ? UiObject.asNode(this.inner) : null;
+}
+
 WhenUi.prototype.amend = function() {
+  this.shouldAppear = this.predicate(this.model);
+  
+  if (this.shouldAppear && !this.inner) {
+    console.log('creating');
+    this.inner = this.renderInner(this.model, this.ui);
+  }
+
+  if (this.shouldAppear) {
+    console.log('showing');
+    // TODO: handle ui objects composed of multiple nodes
+
+    insertInto(this, this.inner, null);
+    this.amendInner(this.model, this.ui);
+
+    //this.parentDom.insertBefore(UiObject.asNode(this.inner), this.getNextNode());
+  } else {
+    console.log('removing');
+    if (this.inner) {
+      remove(this.inner);
+
+      // options are to set it to null for garbage collection,
+      // or to keep a reference to speed up showing it again later.
+
+      // currently, keeping the reference. uncommenting the next line
+      // should not affect behaviour, just have different performance trade offs.
+      //// this.inner = null
+    }
+  }
+}
+
+/*
+function Repeat(projection, struct) {
+  this.projection = projection;
+  this.struct = struct;
+}
+
+Repeat.prototype = new Unit;
+Repeat.prototype.compile = function(bindings) {
+  var me = this;
+  var inner = me.struct.compile(bindings);
+  var recurse = combineAmenders(inner.amenders);
+  var id = newBindingId('when');
+  return {
+    render: function(model, ui) {
+      return ui[id] = new RepeatUi(me.projection, model, inner.render, recurse);
+    },
+    amenders: [function(model, ui) {
+      ui[id].amend();
+    }]
+  };
+}
+
+function RepeatUi(projection, model, renderInner, amendInner) {
+  this.projection = projection;
+  this.model = model;
+  this.renderInner = renderInner;
+  this.amendInner = amendInner;
+
+  // create new ui at this level as inner objects may or
+  // may not exist at various times, so they should not
+  // be accessible to outer level(s).
+  this.ui = {};
+
+  this.children = [];
+}
+RepeatUi.prototype = new UiObject;
+
+RepeatUi.prototype.currentNode = function() {
+  return this.children.length ? UiObject.asNode(this.children[0]) : null;
+}
+
+RepeatUi.prototype.amend = function() {
   this.shouldAppear = this.predicate(this.model);
   
   if (this.shouldAppear && !this.inner) {
@@ -372,20 +476,12 @@ WhenUi.prototype.amend = function() {
     }
   }
 }
+*/
+
 
 function domRemove(node) {
   if (node.parentNode) node.parentNode.removeChild(node);
 }
-
-function implies(a, b) {
-  return a ? b : true;
-}
-WhenUi.prototype.currentNode = function() {
-  assert(implies(this.shouldAppear, this.inner != null), 'WhenUi invariant failed');
-
-  return this.shouldAppear ? UiObject.asNode(this.inner) : null;
-}
-
 
 
 // Returns a function that takes a scope and evaluates the given javascript code in that scope.
