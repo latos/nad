@@ -76,6 +76,7 @@ function TextBlob(str) {
 
 TextBlob.prototype = new Unit;
 
+
 function Html(str) {
   throw 'unimplemented';
   // probably best not to do any interpolation/substitution here, unsafe.
@@ -222,7 +223,7 @@ TextBlob.prototype.compile = function(bindings) {
     },
 
     // currently no amenders.
-    // todo: variable interpolation? via bindings or via model? use link function or not?
+    // todo: variable interpolation using LiveText?
     //    if done, also create a "literal" text function that doesn't do any interpolation whatsoever.
     amenders: []
   }
@@ -489,6 +490,48 @@ RepeatUi.prototype.amend = function() {
   this.renderedModel = newModel;
 }
 
+function LiveText(expr) {
+  this.expr = asScopeFunc(expr);
+}
+LiveText.prototype = new Unit;
+
+LiveText.prototype.compile = function(bindings) {
+  var me = this;
+  var id = newBindingId('text');
+  return {
+    render: function(model, ui) {
+      return ui[id] = new LiveTextUi(me.expr, model);
+    },
+
+    amenders: [function(model, ui) {
+      ui[id].amend();
+    }]
+  }
+}
+
+function toString(something) {
+  return typeof something == 'string' ? something : something + '';
+}
+
+function LiveTextUi(expr, model) {
+  this.expr = expr;
+  this.model = model;
+  this.node = null;
+}
+LiveTextUi.prototype = new UiObject;
+LiveTextUi.prototype.amend = function() {
+  var text = toString(this.expr(this.model));
+  if (this.node) {
+    this.node.data = text;
+  } else {
+    this.node = document.createTextNode(text);
+    insertInto(this.parentUi, this.node, this.getNextNode());
+  }
+}
+LiveTextUi.prototype.currentNode = function() {
+  return this.node;
+}
+
 
 function domRemove(node) {
   if (node.parentNode) node.parentNode.removeChild(node);
@@ -559,7 +602,8 @@ var tpl = {
   C: compile,
 
   when: ctorThunk(When),
-  repeat: ctorThunk(Repeat)
+  repeat: ctorThunk(Repeat),
+  text: ctorThunk(LiveText)
 }
 
 
@@ -619,12 +663,14 @@ var w5 = C(function(bindings) {
     return E('div', {}, [
         'Some text ',
         repeat(X('list'), when('isString($this)',
-          bindings.item = E('span').link(function(r, m, ui){ ui.item.innerText = m; }))),
-        when('show1', label('ONE'))
+          //bindings.item = E('span').link(function(r, m, ui){ ui.item.innerText = m; }))),
+          bindings.item = E('span', {}, text('$this + $this.length + " "')))),
+        when('show1', label(text('lbltext'))),
+        ' yay'
       ]);
   });
 
-var m5 = {list:[1,'2 ',3, '4 '], show1:false}
+var m5 = {list:[1,'2',3, '44'], show1:false, lbltext:'blahblah'}
 var r5 = w5(m5);
   
 
