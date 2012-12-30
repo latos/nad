@@ -58,11 +58,11 @@ function assert(expr, msg /* ... */) {
 function Unit() {}
 Unit.prototype.compile = function(bindings) { throw 'Subclass must implement' }
 
-function Text(str) {
+function TextBlob(str) {
   this.text = str;
 }
 
-Text.prototype = new Unit;
+TextBlob.prototype = new Unit;
 
 function Html(str) {
   throw 'unimplemented';
@@ -76,7 +76,7 @@ function fixContent(content) {
 
   // If it's just plain text, wrap it in a text object
   if (isString(content)) {
-    content = new Text(content);
+    content = new TextBlob(content);
   }
 
   // ... nothing else for now
@@ -145,6 +145,25 @@ Link.prototype.compile = function(bindings) {
 // TODO: multimethod compile functions (select on unit type AND render environment)
 // TODO: what if child object is already compiled or is a template or something?
 
+
+// parentDom: must be a dom node
+// other two args: can be either dom nodes or ui objects.
+function insertInto(parentDom, childUi, beforeUi) {
+  if (childUi instanceof UiObject) {
+    childUi.insertInto(parentDom, beforeUi);
+  } else {
+    parentDom.insertBefore(childUi, UiObject.getNextNode(beforeUi));
+  }
+}
+
+function remove(childUi) {
+  if (childUi instanceof UiObject) {
+    childUi.remove();
+  } else {
+    domRemove(childUi);
+  }
+}
+
 Elem.prototype.compile = function(bindings) {
   var me = this;
 
@@ -178,13 +197,15 @@ Elem.prototype.compile = function(bindings) {
       var prev = null;
       for (var i = renderers.length - 1; i >= 0; i--) {
         var rendered = renderers[i](model, ui);
-        if (rendered instanceof UiObject) {
-          // special wrapper object of sorts
-          rendered.insertInto(el, prev);
-        } else {
-          // assume it's just a dom element
-          el.insertBefore(renderers[i](model, ui), el.firstChild);
-        }
+        insertInto(el, rendered, prev);
+
+        //if (rendered instanceof UiObject) {
+        //  // special wrapper object of sorts
+        //  rendered.insertInto(el, prev);
+        //} else {
+        //  // assume it's just a dom element
+        //  el.insertBefore(rendered, el.firstChild);
+        //}
         prev = rendered;
       }
 
@@ -194,7 +215,7 @@ Elem.prototype.compile = function(bindings) {
   }
 }
 
-Text.prototype.compile = function(bindings) {
+TextBlob.prototype.compile = function(bindings) {
   var me = this;
 
   return {
@@ -210,42 +231,161 @@ Text.prototype.compile = function(bindings) {
 }
 
 function UiObject(){}
-UiObject.prototype.insertInto = function(parentNode, beforeSibling) {
-  throw 'Subclass must implement'
+UiObject.asNode = function(obj) {
+  if (obj instanceof UiObject) {
+    return obj.currentNode();
+  }
+
+  return obj;
+}
+UiObject.prototype.insertInto = function(parentDom, beforeSibling) {
+  this.parentDom = parentDom;
+  this.nextUi = beforeSibling;
+}
+// NOTE: remove is not the opposite of insertInto
+// insertInto does the logical insert of UI objects, the physical
+// dom insert is up to their logic
+// but remove is the physical detach as well as the logical detach.
+// TODO; clean up this inconsistency?
+UiObject.prototype.remove = function() {
+  this.detachDom();
+  //assert(node == null || node.parentNode == null, 'amend not called or did not physically detach the dom');
+
+  this.parentDom = null;
+  this.nextUi = null;
 }
 
+UiObject.prototype.detachDom = function() {
+  var node = this.currentNode();
+  if (node) {
+    domRemove(node);
+  }
+}
 
-// TODO: get rid of Template intermediate object?
-function Template(struct, bindings) {
+UiObject.prototype.getNodeOrNext = function() {
+  return this.currentNode() || this.getNextNode();
+}
+
+UiObject.getNextNode = function(nextUi) {
+  var next = (nextUi instanceof UiObject 
+      ? nextUi.getNodeOrNext()
+      : nextUi);
+
+  return next;
+}
+
+UiObject.prototype.getNextNode = function() {
+  var next = UiObject.getNextNode(this.nextUi);
+  assert(next.parentNode == this.parentDom, 'invalid dom structure');
+  return next;
+}
+
+// Should return the current, left-most dom node of the UI
+// object iff that node exists and is in-place in the dom.
+// Otherwise, should return null.
+UiObject.prototype.currentNode = function() {
+  throw 'Subclass must implement';
+}
+
+function asScopeFunc(val) {
+  if (isString(val)) {
+    return scopeEval(val);
+  }
+
+  assert(val.constructor == Function);
+
+  return val;
+}
+
+function When(predicate, struct) {
+  this.predicate = predicate;
   this.struct = struct;
-  this.bindings = bindings;
 }
 
-Template.prototype.compile = function() {
+// TODO: try to get rid of needing this.
+function newBindingId(debug) {
+  return '$_' + (newBindingId.next++) + '_' + (debug || '');
+}
+newBindingId.next = 1;
+
+When.prototype = new Unit;
+When.prototype.compile = function(bindings) {
   var me = this;
-
-  var compiled = me.struct.compile(me.bindings);
-  var amender = combineAmenders(compiled.amenders);
-
-  var render = function(model) {
-      var liveBindings = {};
-      var root = compiled.render(model, liveBindings);
-      if (!liveBindings.root) liveBindings.root = root;
-
-      var liveUi = {
-        ui: liveBindings,
-        amend: function() {
-          amender(model, liveBindings);
-        }
-      }
-
-      liveUi.amend();
-
-      return liveUi;
-    }
-
-  return render;
+  var inner = me.struct.compile(bindings);
+  var recurse = combineAmenders(inner.amenders);
+  var id = newBindingId('when');
+  return {
+    render: function(model, ui) {
+      return ui[id] = new WhenUi(me.predicate, model, inner.render, recurse);
+    },
+    amenders: [function(model, ui) {
+      ui[id].amend();
+    }]
+  };
 }
+
+function WhenUi(predicate, model, renderInner, amendInner) {
+  this.predicate = predicate;
+  this.model = model;
+  this.renderInner = renderInner;
+  this.amendInner = amendInner;
+
+  // create new ui at this level as inner objects may or
+  // may not exist at various times, so they should not
+  // be accessible to outer level(s).
+  this.ui = {};
+
+  // Invariant: this.shouldAppear implies this.inner != null
+  // The converse is arbitrary (currently, node is only
+  // created when first needed, but is then not subsequently destroyed).
+  this.shouldAppear = false;
+  this.inner = null;
+}
+WhenUi.prototype = new UiObject;
+WhenUi.prototype.amend = function() {
+  this.shouldAppear = this.predicate(this.model);
+  
+  if (this.shouldAppear && !this.inner) {
+    console.log('creating');
+    this.inner = this.renderInner(this.model, this.ui);
+  }
+
+  if (this.shouldAppear) {
+    console.log('showing');
+    // TODO: handle ui objects composed of multiple nodes
+
+    insertInto(this.parentDom, this.inner, this.getNextNode());
+    this.amendInner(this.model, this.ui);
+
+    //this.parentDom.insertBefore(UiObject.asNode(this.inner), this.getNextNode());
+  } else {
+    console.log('removing');
+    if (this.inner) {
+      remove(this.inner);
+
+      // options are to set it to null for garbage collection,
+      // or to keep a reference to speed up showing it again later.
+
+      // currently, keeping the reference. uncommenting the next line
+      // should not affect behaviour, just have different performance trade offs.
+      //// this.inner = null
+    }
+  }
+}
+
+function domRemove(node) {
+  if (node.parentNode) node.parentNode.removeChild(node);
+}
+
+function implies(a, b) {
+  return a ? b : true;
+}
+WhenUi.prototype.currentNode = function() {
+  assert(implies(this.shouldAppear, this.inner != null), 'WhenUi invariant failed');
+
+  return this.shouldAppear ? UiObject.asNode(this.inner) : null;
+}
+
 
 
 // Returns a function that takes a scope and evaluates the given javascript code in that scope.
@@ -257,8 +397,28 @@ function scopeEval(expr) {
 function compile(tplFunc) {
   var bindings = {};
   var struct = tplFunc(bindings);
-  var t = new Template(struct, bindings);
-  return t.compile();
+
+  var compiled = struct.compile(bindings);
+  var amender = combineAmenders(compiled.amenders);
+
+  var render = function(model) {
+      var ui = {};
+      var root = compiled.render(model, ui);
+      if (!ui.root) ui.root = root;
+
+      var liveUi = {
+        ui: ui,
+        amend: function() {
+          amender(model, ui);
+        }
+      }
+
+      liveUi.amend();
+
+      return liveUi;
+    }
+
+  return render;
 }
 
 // Equivalent of func.apply(), but by calling "new" on the function, instead
@@ -284,12 +444,14 @@ function ctorThunk(constructor) {
 }
 
 var tpl = {
-  T: ctorThunk(Text),
+  T: ctorThunk(TextBlob),
   H: ctorThunk(Html),
   E: ctorThunk(Elem),
   L: ctorThunk(Link),
   X: scopeEval,
-  C: compile
+  C: compile,
+
+  when: ctorThunk(When)
 }
 
 
@@ -318,7 +480,6 @@ var w3 = C(function(bindings) {
         bindings.label = E('span'),
         'Some more text'
       ]).link(function(recurse, model, ui) {
-        console.log(model, ui);
         ui.label.style.color = model.color;
         ui.label.innerText = model.label
       });
@@ -326,6 +487,25 @@ var w3 = C(function(bindings) {
 
 var m3 = {color: 'red', label: 'my label model'}
 var r3 = w3(m3);
+  
+
+function label(text) {
+  return tpl.E('span', {}, text);
+}
+
+var w4 = C(function(bindings) {
+    return E('div', {}, [
+        'Some text ',
+        when(X('show1'), label('ONE ')),
+        when(X('show2'), label('TWO ')),
+        when(X('show1 || show2'), label('EITHEREXPR ')),
+        when(X('show1'), when(X('show2'), label('BOTHNESTED '))),
+        ' Some more text'
+      ]);
+  });
+
+var m4 = {show1:true, show2:false}
+var r4 = w4(m4);
   
 
 // future possible examples mucking around
