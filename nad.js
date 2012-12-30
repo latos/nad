@@ -347,7 +347,7 @@ function newBindingId(debug) {
 newBindingId.next = 1;
 
 function When(predicate, struct) {
-  this.predicate = predicate;
+  this.predicate = asScopeFunc(predicate);
   this.struct = struct;
 }
 
@@ -424,7 +424,7 @@ WhenUi.prototype.amend = function() {
 }
 
 function Repeat(projection, struct) {
-  this.projection = projection;
+  this.projection = asScopeFunc(projection);
   this.struct = struct;
 }
 
@@ -604,10 +604,10 @@ function label(text) {
 var w4 = C(function(bindings) {
     return E('div', {}, [
         'Some text ',
-        when(X('show1'), label('ONE ')),
-        when(X('show2'), label('TWO ')),
-        when(X('show1 || show2'), label('EITHEREXPR ')),
-        when(X('show1'), when(X('show2'), label('BOTHNESTED '))),
+        when('show1', label('ONE ')),
+        when('show2', label('TWO ')),
+        when('show1 || show2', label('EITHEREXPR ')),
+        when('show1', when('show2', label('BOTHNESTED '))),
         ' Some more text'
       ]);
   });
@@ -618,9 +618,9 @@ var r4 = w4(m4);
 var w5 = C(function(bindings) {
     return E('div', {}, [
         'Some text ',
-        repeat(X('list'), when(X('isString($this)'),
+        repeat(X('list'), when('isString($this)',
           bindings.item = E('span').link(function(r, m, ui){ ui.item.innerText = m; }))),
-        when(X('show1'), label('ONE'))
+        when('show1', label('ONE'))
       ]);
   });
 
