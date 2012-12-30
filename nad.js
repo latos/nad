@@ -61,6 +61,14 @@ function assert(expr, msg /* ... */) {
 
 function Unit() {}
 Unit.prototype.compile = function(bindings) { throw 'Subclass must implement' }
+Unit.prototype.findBinding = function(bindings) {
+  for (var k in bindings) {
+    if (bindings[k] == this) {
+      return k;
+    }
+  }
+  return null;
+}
 
 function TextBlob(str) {
   this.text = str;
@@ -135,8 +143,17 @@ function combineAmenders(list) {
 
 Link.prototype.compile = function(bindings) {
   var me = this;
+  
+  var binding = me.findBinding(bindings);
+  if (binding) {
+    // re-write binding to the actual ui we want, not
+    // the function linking wrapper.
+    bindings[binding] = me.linked;
+  }
+
   var inner = me.linked.compile(bindings);
   var recurse = combineAmenders(inner.amenders);
+
   return {
     render: inner.render,
     amenders: [function(model, ui) {
@@ -162,12 +179,7 @@ Elem.prototype.compile = function(bindings) {
     renderers.push(child.render);
   }
 
-  var binding = null;
-  for (var k in bindings) {
-    if (bindings[k] == me) {
-      binding = k;
-    }
-  }
+  var binding = me.findBinding(bindings);
 
   return {
     render: function(model, ui) {
@@ -322,6 +334,12 @@ function asScopeFunc(val) {
   return val;
 }
 
+function inheritObject(fromObj) {
+  function F(){};
+  F.prototype = fromObj;
+  return new F;
+}
+
 // TODO: try to get rid of needing this.
 function newBindingId(debug) {
   return '$_' + (newBindingId.next++) + '_' + (debug || '');
@@ -341,7 +359,7 @@ When.prototype.compile = function(bindings) {
   var id = newBindingId('when');
   return {
     render: function(model, ui) {
-      return ui[id] = new WhenUi(me.predicate, model, inner.render, recurse);
+      return ui[id] = new WhenUi(me.predicate, model, inner.render, recurse, ui);
     },
     amenders: [function(model, ui) {
       ui[id].amend();
@@ -349,16 +367,13 @@ When.prototype.compile = function(bindings) {
   };
 }
 
-function WhenUi(predicate, model, renderInner, amendInner) {
+function WhenUi(predicate, model, renderInner, amendInner, outerUi) {
   this.predicate = predicate;
   this.model = model;
   this.renderInner = renderInner;
   this.amendInner = amendInner;
 
-  // create new ui at this level as inner objects may or
-  // may not exist at various times, so they should not
-  // be accessible to outer level(s).
-  this.ui = {};
+  this.outerUi = outerUi;
 
   // Invariant: this.shouldAppear implies this.inner != null
   // The converse is arbitrary (currently, node is only
@@ -376,20 +391,23 @@ WhenUi.prototype.currentNode = function() {
 
 WhenUi.prototype.amend = function() {
   this.shouldAppear = this.predicate(this.model);
+
+
+  assert( (this.ui?true:false) == (this.inner?true:false) );
   
   if (this.shouldAppear && !this.inner) {
     console.log('creating');
+    // create new ui at this level as inner objects may or
+    // may not exist at various times, so they should not
+    // be accessible to outer level(s).
+    this.ui = inheritObject(this.outerUi);
     this.inner = this.renderInner(this.model, this.ui);
   }
 
   if (this.shouldAppear) {
     console.log('showing');
-    // TODO: handle ui objects composed of multiple nodes
-
     insertInto(this, this.inner, null);
     this.amendInner(this.model, this.ui);
-
-    //this.parentDom.insertBefore(UiObject.asNode(this.inner), this.getNextNode());
   } else {
     console.log('removing');
     if (this.inner) {
@@ -405,7 +423,6 @@ WhenUi.prototype.amend = function() {
   }
 }
 
-/*
 function Repeat(projection, struct) {
   this.projection = projection;
   this.struct = struct;
@@ -416,10 +433,10 @@ Repeat.prototype.compile = function(bindings) {
   var me = this;
   var inner = me.struct.compile(bindings);
   var recurse = combineAmenders(inner.amenders);
-  var id = newBindingId('when');
+  var id = newBindingId('repeat');
   return {
     render: function(model, ui) {
-      return ui[id] = new RepeatUi(me.projection, model, inner.render, recurse);
+      return ui[id] = new RepeatUi(me.projection, model, inner.render, recurse, ui);
     },
     amenders: [function(model, ui) {
       ui[id].amend();
@@ -427,18 +444,17 @@ Repeat.prototype.compile = function(bindings) {
   };
 }
 
-function RepeatUi(projection, model, renderInner, amendInner) {
+function RepeatUi(projection, model, renderInner, amendInner, outerUi) {
   this.projection = projection;
   this.model = model;
   this.renderInner = renderInner;
   this.amendInner = amendInner;
 
-  // create new ui at this level as inner objects may or
-  // may not exist at various times, so they should not
-  // be accessible to outer level(s).
-  this.ui = {};
+  this.outerUi = outerUi;
 
   this.children = [];
+
+  this.renderedModel = [];
 }
 RepeatUi.prototype = new UiObject;
 
@@ -447,36 +463,31 @@ RepeatUi.prototype.currentNode = function() {
 }
 
 RepeatUi.prototype.amend = function() {
-  this.shouldAppear = this.predicate(this.model);
-  
-  if (this.shouldAppear && !this.inner) {
-    console.log('creating');
-    this.inner = this.renderInner(this.model, this.ui);
+
+  var newModel = this.projection(this.model);
+
+  // TODO: use proper list diff.
+  // for now, remove everything & re-add everything.
+  for (var i = 0; i < this.children.length; i++) {
+    remove(this.children[i]);
+  }
+  this.children = []
+  var prevChild = null;
+  for (var i = newModel.length - 1; i >= 0; i--) {
+    // create new ui and model for each child
+    var m = newModel[i];
+    var ui = inheritObject(this.outerUi);
+    var child = this.renderInner(m, ui);
+    this.children.unshift(child);
+
+    insertInto(this, child, prevChild);
+    this.amendInner(m, ui);
+
+    prevChild = child;
   }
 
-  if (this.shouldAppear) {
-    console.log('showing');
-    // TODO: handle ui objects composed of multiple nodes
-
-    insertInto(this.parentDom, this.inner, this.getNextNode());
-    this.amendInner(this.model, this.ui);
-
-    //this.parentDom.insertBefore(UiObject.asNode(this.inner), this.getNextNode());
-  } else {
-    console.log('removing');
-    if (this.inner) {
-      remove(this.inner);
-
-      // options are to set it to null for garbage collection,
-      // or to keep a reference to speed up showing it again later.
-
-      // currently, keeping the reference. uncommenting the next line
-      // should not affect behaviour, just have different performance trade offs.
-      //// this.inner = null
-    }
-  }
+  this.renderedModel = newModel;
 }
-*/
 
 
 function domRemove(node) {
@@ -547,7 +558,8 @@ var tpl = {
   X: scopeEval,
   C: compile,
 
-  when: ctorThunk(When)
+  when: ctorThunk(When),
+  repeat: ctorThunk(Repeat)
 }
 
 
@@ -602,6 +614,18 @@ var w4 = C(function(bindings) {
 
 var m4 = {show1:true, show2:false}
 var r4 = w4(m4);
+  
+var w5 = C(function(bindings) {
+    return E('div', {}, [
+        'Some text ',
+        repeat(X('list'), when(X('isString($this)'),
+          bindings.item = E('span').link(function(r, m, ui){ ui.item.innerText = m; }))),
+        when(X('show1'), label('ONE'))
+      ]);
+  });
+
+var m5 = {list:[1,'2 ',3, '4 '], show1:false}
+var r5 = w5(m5);
   
 
 // future possible examples mucking around
